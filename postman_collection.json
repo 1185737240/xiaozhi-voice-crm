@@ -1,0 +1,95 @@
+{
+    "info": {
+      "name": "小智语音问答 API",
+      "description": "xiaozhi-voice-crm 服务接口测试集合",
+      "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+    },
+    "variable": [
+      { "key": "base_url", "value": "http://127.0.0.1:8000", "type": "string" }
+    ],
+    "item": [
+      {
+        "name": "健康检查",
+        "request": {
+          "method": "GET",
+          "url": "{{base_url}}/health",
+          "description": "检查服务是否正常运行"
+        }
+      },
+      {
+        "name": "文本问答（JSON）",
+        "request": {
+          "method": "POST",
+          "url": "{{base_url}}/ask",
+          "header": [{ "key": "Content-Type", "value": "application/x-www-form-urlencoded" }],
+          "body": {
+            "mode": "urlencoded",
+            "urlencoded": [
+              { "key": "text",         "value": "你好，我叫张三，手机号是13800138000" },
+              { "key": "session_id",   "value": "user_test_001" },
+              { "key": "return_audio", "value": "true" }
+            ]
+          },
+          "description": "发送文字消息，返回 AI 回复文字和 base64 MP3 语音"
+        }
+      },
+      {
+        "name": "文本问答（追加会话）",
+        "request": {
+          "method": "POST",
+          "url": "{{base_url}}/ask",
+          "header": [{ "key": "Content-Type", "value": "application/x-www-form-urlencoded" }],
+          "body": {
+            "mode": "urlencoded",
+            "urlencoded": [
+              { "key": "text",         "value": "我的邮箱是zhangsan@qq.com，想了解课程价格" },
+              { "key": "session_id",   "value": "user_test_001" },
+              { "key": "return_audio", "value": "false" }
+            ]
+          },
+          "description": "同一 session_id 追加消息，AI 会记住上下文（多轮对话）"
+        }
+      },
+      {
+        "name": "语音问答（上传录音）",
+        "request": {
+          "method": "POST",
+          "url": "{{base_url}}/ask",
+          "body": {
+            "mode": "formdata",
+            "formdata": [
+              { "key": "audio",        "type": "file",    "src": "/path/to/your/recording.wav",
+                "description": "替换为本地录音文件路径（WAV/WebM/MP3）" },
+              { "key": "session_id",   "type": "text",    "value": "user_voice_001" },
+              { "key": "return_audio", "type": "text",    "value": "true" }
+            ]
+          },
+          "description": "上传录音文件，自动 ASR 识别后返回 AI 文字+语音回复"
+        }
+      },
+      {
+        "name": "查询所有 CRM 用户",
+        "request": {
+          "method": "GET",
+          "url": "{{base_url}}/crm/users",
+          "description": "获取所有对话中提取到的用户信息"
+        }
+      },
+      {
+        "name": "查询单个用户",
+        "request": {
+          "method": "GET",
+          "url": "{{base_url}}/crm/users/user_test_001",
+          "description": "根据 session_id 查询单个用户信息"
+        }
+      },
+      {
+        "name": "查看 FastAPI 自动文档",
+        "request": {
+          "method": "GET",
+          "url": "{{base_url}}/docs",
+          "description": "FastAPI 自动生成的 Swagger UI，可以在线测试所有接口"
+        }
+      }
+    ]
+  }

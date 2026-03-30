@@ -1,0 +1,43 @@
+# ============================================================
+# 项目依赖包列表
+# 安装命令：pip install -r requirements.txt
+# 建议使用清华镜像加速：
+#   pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+# ============================================================
+
+# --- Web 框架后端 ---
+fastapi==0.115.5          # 高性能 Web 框架，用来搭建 API 服务
+uvicorn[standard]==0.32.1  # ASGI 服务器，运行 FastAPI 的工具
+websockets==13.1           # WebSocket 支持（实时通信）
+python-multipart==0.0.12   # 支持接收文件上传
+
+# --- AI 模型调用 ---
+openai==1.57.0             # 兼容 DeepSeek API（DeepSeek 支持 OpenAI 接口格式）
+
+# --- 语音识别 ASR ---
+faster-whisper==1.1.0      # OpenAI Whisper 的快速版，支持中文
+# 说明：第一次运行会自动下载模型文件（约150MB），请耐心等待
+
+# --- 语音合成 TTS ---
+edge-tts==6.1.12           # 微软 Edge 浏览器的语音合成服务（免费、中文效果好）
+
+# --- 音频处理 ---
+numpy==1.26.4              # 数值计算库，处理音频数组
+soundfile==0.12.1          # 读写音频文件（WAV 格式）
+pydub==0.25.1              # 音频格式转换（WebM 转 WAV 等）
+
+# --- 数据库 ---
+sqlalchemy==2.0.36         # Python 数据库操作库（支持 SQLite）
+# SQLite 是 Python 内置的，不需要额外安装
+
+# --- 异步工具 ---
+aiofiles==24.1.0           # 异步读写文件
+
+# --- Gradio 测试界面 ---
+gradio                     # 快速构建 AI Demo 界面（会自动安装最新兼容版本）
+# 注：你的版本是 6.9.0，上面不指定版本会自动兼容
+
+# --- 其他工具 ---
+pydantic==2.10.3           # 数据验证库（FastAPI 自动用到）
+httpx==0.28.1              # 异步 HTTP 请求库
+python-dotenv==1.0.1       # 从 .env 文件读取环境变量（可选）
