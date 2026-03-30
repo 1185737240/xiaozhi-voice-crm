@@ -1,5 +1,9 @@
-echo __pycache__/ > .gitignore
-echo *.pyc >> .gitignore
-echo *.db >> .gitignore
-echo temp_audio/ >> .gitignore
-echo .vscode/ >> .gitignore
+__pycache__/
+*.pyc
+*.pyo
+*.db
+temp_audio/
+.vscode/
+static/
+*.webm
+chat_records_readable.txt
