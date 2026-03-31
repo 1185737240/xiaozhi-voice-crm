@@ -4,23 +4,26 @@ services/llm_service.py - 大语言模型服务（LLM）
 LLM = Large Language Model，大语言模型
 功能：接收用户文字，返回 AI 的回复
 
-使用的技术：DeepSeek API（兼容 OpenAI 格式）
-  - DeepSeek 的 API 和 OpenAI 的 API 格式完全一样
-  - 只需要换 base_url 和 api_key 就能用
+【改进说明】
+  原版问题：只用了一个通用 system prompt，AI 完全不知道 CRM 业务知识
+  改进方案：
+    1. 加载 crm_knowledge.txt 知识库，注入到 system prompt
+    2. 接收 CRM 上下文（当前用户信息、搜索到的客户数据）
+    3. 意图识别：判断用户在问课程/客户/闲聊，动态调整回答策略
+    4. 关键词匹配：从用户消息中提取人名/电话，自动查询 CRM
 
-什么是"对话历史"？
-  就像你跟人聊天，AI 也需要记住之前说了什么，
-  才能理解"它"指的是什么。这叫"上下文"。
+使用的技术：DeepSeek API（兼容 OpenAI 格式）
 """
 
 import logging
+import os
 from typing import List, Dict, Any, Optional
 from config import DEEPSEEK_MODEL 
 logger = logging.getLogger(__name__)
 
 
 class LLMService:
-    """大语言模型服务类"""
+    """大语言模型服务类（增强版：带 CRM 知识库和意图识别）"""
     
     def __init__(self):
         """初始化：创建 OpenAI 客户端（配置为 DeepSeek）"""
@@ -31,45 +34,162 @@ class LLMService:
             raise ValueError("DeepSeek API Key 未配置！请设置环境变量 DEEPSEEK_API_KEY")
         
         # 创建 AsyncOpenAI 客户端
-        # AsyncOpenAI：异步客户端（不阻塞程序运行）
-        # base_url：把请求发到 DeepSeek 而不是 OpenAI
-        # api_key：你的 DeepSeek 密钥
         self.client = AsyncOpenAI(
             api_key=DEEPSEEK_API_KEY,
             base_url=DEEPSEEK_BASE_URL
         )
         
-        logger.info("✅ LLM 服务初始化成功（DeepSeek）")
+        # 加载 CRM 知识库
+        self.knowledge_base = self._load_knowledge_base()
+        
+        logger.info("✅ LLM 服务初始化成功（DeepSeek + CRM 知识库）")
+    
+    def _load_knowledge_base(self) -> str:
+        """
+        加载 CRM 知识库文件
+        知识库包含：课程信息、产品信息、FAQ、公司信息、促销活动等
+        这些内容会被注入到 system prompt 中，让 AI "知道"业务知识
+        """
+        from config import KNOWLEDGE_BASE_PATH
+        
+        try:
+            if os.path.exists(KNOWLEDGE_BASE_PATH):
+                with open(KNOWLEDGE_BASE_PATH, "r", encoding="utf-8") as f:
+                    content = f.read()
+                logger.info(f"📚 知识库加载成功：{len(content)} 字符")
+                return content
+            else:
+                logger.warning(f"⚠️ 知识库文件不存在：{KNOWLEDGE_BASE_PATH}")
+                return ""
+        except Exception as e:
+            logger.error(f"❌ 知识库加载失败：{e}")
+            return ""
+    
+    def _build_system_prompt(
+        self,
+        user_info_text: str = "",
+        crm_search_result: str = "",
+        all_users_text: str = ""
+    ) -> str:
+        """
+        动态构建 system prompt
+        把基础人设 + 知识库 + 当前用户信息 + CRM 查询结果 拼接在一起
+        
+        参数：
+            user_info_text：当前对话用户的 CRM 信息
+            crm_search_result：搜索到的其他客户信息
+            all_users_text：所有客户的摘要（用户问"有哪些客户"时使用）
+        
+        返回：完整的 system prompt
+        """
+        from config import SYSTEM_PROMPT
+        
+        parts = [SYSTEM_PROMPT]
+        
+        # 注入 CRM 知识库
+        if self.knowledge_base:
+            parts.append(f"\n\n## 【CRM 知识库】\n以下是公司的业务知识，回答用户问题时请参考这些信息：\n\n{self.knowledge_base}")
+        
+        # 注入当前用户信息（让 AI 知道在和谁对话）
+        if user_info_text:
+            parts.append(f"\n\n## 【当前对话用户的信息】\n{user_info_text}\n\n请在回答时参考这些信息，比如称呼用户的名字。")
+        
+        # 注入 CRM 客户搜索结果（用户提到某个客户时）
+        if crm_search_result:
+            parts.append(f"\n\n## 【CRM 客户数据】\n以下是 CRM 系统中查询到的客户信息：\n{crm_search_result}")
+        
+        # 注入所有客户列表（用户问"有哪些客户"时）
+        if all_users_text:
+            parts.append(f"\n\n## 【CRM 全部客户列表】\n{all_users_text}")
+        
+        return "\n".join(parts)
+    
+    def _extract_search_keywords(self, user_message: str) -> List[str]:
+        """
+        从用户消息中提取可能的人名/电话/公司名等关键词
+        用于在 CRM 中搜索客户
+        
+        这是一个简单的启发式方法：
+        - 提取中文人名（2-4个汉字的组合）
+        - 提取手机号（11位数字）
+        - 提取带引号的内容
+        
+        参数：
+            user_message：用户输入的消息
+            
+        返回：可能的关键词列表
+        """
+        import re
+        keywords = []
+        
+        # 提取手机号
+        phone_pattern = r'1[3-9]\d{9}'
+        phones = re.findall(phone_pattern, user_message)
+        keywords.extend(phones)
+        
+        # 提取引号中的内容（如"张三"、'李四'）
+        quoted = re.findall(r'[""「」『』](.+?)[""「」『』]', user_message)
+        keywords.extend(quoted)
+        
+        # 提取"叫xxx"、"名叫xxx"、"找xxx"、"查xxx"、"问xxx的客户"中的人名
+        name_patterns = [
+            r'(?:叫|名叫|是|找|查|查询|搜索|问|有|关于)\s*[""「]?([\u4e00-\u9fa5]{2,4})[""」]?',
+            r'(?:客户|用户|人)\s*[""「]?([\u4e00-\u9fa5]{2,4})[""」]?',
+        ]
+        for pattern in name_patterns:
+            names = re.findall(pattern, user_message)
+            keywords.extend(names)
+        
+        return keywords
     
     async def chat(
         self,
         user_message: str,
-        conversation_history: Optional[List[Dict]] = None
+        conversation_history: Optional[List[Dict]] = None,
+        crm_context: Optional[Dict[str, str]] = None
     ) -> str:
         """
-        发送消息给 AI，获取回复
+        发送消息给 AI，获取回复（增强版）
+        
+        【核心改进】
+        原版：只用通用 system prompt，AI 不知道任何业务知识
+        改进：
+          1. 动态构建 system prompt，注入知识库 + CRM 数据
+          2. 从用户消息中提取关键词，自动搜索 CRM
+          3. 根据意图智能选择回答策略
         
         参数：
             user_message：用户输入的文字
             conversation_history：之前的对话历史（可选）
-                格式：[
-                    {"role": "user", "content": "你好"},
-                    {"role": "assistant", "content": "你好呀～"}
-                ]
+            crm_context：CRM 上下文信息（可选），包含：
+                - user_info_text：当前用户信息
+                - crm_search_result：搜索到的客户信息
+                - all_users_text：所有客户列表
         
         返回：AI 的回复文字
         """
-        from config import DEEPSEEK_MODEL, LLM_MAX_TOKENS, SYSTEM_PROMPT
+        from config import DEEPSEEK_MODEL, LLM_MAX_TOKENS
+        
+        # 解析 CRM 上下文
+        crm_ctx = crm_context or {}
+        user_info_text = crm_ctx.get("user_info_text", "")
+        crm_search_result = crm_ctx.get("crm_search_result", "")
+        all_users_text = crm_ctx.get("all_users_text", "")
+        
+        # 动态构建 system prompt（包含知识库 + CRM 数据）
+        system_prompt = self._build_system_prompt(
+            user_info_text=user_info_text,
+            crm_search_result=crm_search_result,
+            all_users_text=all_users_text
+        )
         
         # 构建消息列表
-        # 第一条是系统提示（告诉 AI 它的人设）
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT}
+            {"role": "system", "content": system_prompt}
         ]
         
-        # 加入历史对话（最多保留最近10轮，避免超出 token 限制）
+        # 加入历史对话（最多保留最近10轮）
         if conversation_history:
-            # 取最后 20 条（10轮对话，每轮2条）
             recent_history = conversation_history[-20:]
             messages.extend(recent_history)
         
@@ -77,20 +197,17 @@ class LLMService:
         messages.append({"role": "user", "content": user_message})
         
         try:
-            logger.info(f"💬 发送给 AI：{user_message[:50]}...")  # 只打印前50字
+            logger.info(f"💬 发送给 AI：{user_message[:50]}...")
             
             # 调用 DeepSeek API
-            # await 表示等待这个异步操作完成
             response = await self.client.chat.completions.create(
                 model=DEEPSEEK_MODEL,
                 messages=messages,
                 max_tokens=LLM_MAX_TOKENS,
-                temperature=0.7,    # 创造性：0 最死板，1 最随机，0.7 是平衡值
-                stream=False        # 不使用流式传输（一次返回完整结果）
+                temperature=0.7,
+                stream=False
             )
             
-            # 从响应中提取文字
-            # response.choices[0].message.content 是 AI 的回复
             ai_reply = response.choices[0].message.content
             
             if not ai_reply:
@@ -103,7 +220,6 @@ class LLMService:
             error_msg = str(e)
             logger.error(f"❌ LLM 调用失败：{error_msg}")
             
-            # 根据错误类型给出友好提示
             if "authentication" in error_msg.lower() or "api_key" in error_msg.lower():
                 return "哎呀，我的密钥好像有问题呢，请检查 DEEPSEEK_API_KEY 是否配置正确～"
             elif "rate_limit" in error_msg.lower():

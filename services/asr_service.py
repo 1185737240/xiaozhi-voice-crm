@@ -85,16 +85,12 @@ class ASRService:
         
         参数：
             audio_bytes：音频数据（字节格式）
-            audio_format：音频格式，默认 "wav"，也支持 "webm"
+            audio_format：音频格式，默认 "wav"，也支持 "webm"、"mp4"
         
         返回：
             识别出来的文字字符串
-        
-        async 是什么？
-            异步函数，表示这个函数可以"等待"而不阻塞其他任务，
-            就像你可以在烧水的同时做其他事情。
         """
-        from config import WHISPER_LANGUAGE
+        from config import WHISPER_LANGUAGE, ASR_INITIAL_PROMPT
         
         if not self.model:
             raise RuntimeError("Whisper 模型未加载！")
@@ -103,30 +99,27 @@ class ASRService:
             return ""
         
         # 使用临时文件处理音频
-        # tempfile.NamedTemporaryFile 创建一个临时文件，用完自动删除
         with tempfile.NamedTemporaryFile(suffix=f".{audio_format}", delete=False) as tmp_file:
             tmp_path = tmp_file.name
-            tmp_file.write(audio_bytes)  # 把音频数据写入临时文件
+            tmp_file.write(audio_bytes)
         
         try:
             logger.info(f"🎤 开始识别音频，格式：{audio_format}，大小：{len(audio_bytes)} 字节")
             
             # 调用 Whisper 进行语音识别
-            # segments 是识别结果的片段列表
-            # info 包含语言检测等信息
             segments, info = self.model.transcribe(
                 tmp_path,
-                language=WHISPER_LANGUAGE,    # 语言：zh 中文
-                beam_size=5,                   # 搜索宽度，越大越准但越慢
-                vad_filter=True,               # 过滤静音片段（VAD = Voice Activity Detection）
+                language=WHISPER_LANGUAGE,
+                beam_size=5,
+                vad_filter=True,
                 vad_parameters={
-                    "min_silence_duration_ms": 500  # 静音超过500ms就切断
-                }
+                    "min_silence_duration_ms": 1000,   # 静音超过1秒才切断（原来500ms太敏感）
+                    "min_speech_duration_ms": 250,     # 语音片段最短250ms（过滤掉太短的噪声）
+                    "speech_pad_ms": 200               # 语音前后各留200ms缓冲
+                },
+                initial_prompt=ASR_INITIAL_PROMPT      # 引导模型输出简体中文
             )
             
-            # 把所有片段的文字拼接起来
-            # 这里用了"列表推导式"：[x.text for x in segments]
-            # 意思是：对 segments 里每个 x，取它的 .text 属性
             text_parts = [segment.text for segment in segments]
             result = "".join(text_parts).strip()
             
@@ -141,36 +134,42 @@ class ASRService:
             logger.error(f"❌ 语音识别失败：{e}")
             return ""
         finally:
-            # finally 块不管成功还是失败都会执行
-            # 确保临时文件被删除，避免磁盘占用
             if os.path.exists(tmp_path):
                 os.unlink(tmp_path)
     
-    async def transcribe_from_webm(self, webm_bytes: bytes) -> str:
+    async def transcribe_from_browser(self, audio_bytes: bytes, mime_type: str = "webm") -> str:
         """
-        专门处理浏览器录音（WebM 格式）
+        处理浏览器录音（支持 WebM 和 MP4 两种格式）
         
-        浏览器的 MediaRecorder 默认录制 WebM/Opus 格式，
-        这个方法先用 pydub 转换成 WAV，再识别。
+        浏览器的 MediaRecorder 在不同系统上可能录制不同格式：
+        - Chrome/Edge（Windows）：通常是 WebM/Opus
+        - Chrome/Edge（Mac/Safari）：可能是 MP4/AAC
+        - Firefox：通常是 WebM/Opus
+        
+        参数：
+            audio_bytes：音频字节数据
+            mime_type：MIME 类型，"webm" 或 "mp4"
         """
         try:
             from pydub import AudioSegment
             
-            # 从字节数据创建 AudioSegment 对象
-            # io.BytesIO 把字节数据包装成文件对象，不需要真正写到硬盘
-            audio = AudioSegment.from_file(io.BytesIO(webm_bytes), format="webm")
+            # 根据实际格式进行转换（不再硬编码 webm）
+            audio = AudioSegment.from_file(io.BytesIO(audio_bytes), format=mime_type)
             
-            # 转换为 WAV 格式（Whisper 更好处理）
+            # 统一转为 16kHz 单声道 WAV（Whisper 最友好的格式）
+            audio = audio.set_frame_rate(16000).set_channels(1)
+            
             wav_buffer = io.BytesIO()
             audio.export(wav_buffer, format="wav")
             wav_bytes = wav_buffer.getvalue()
             
+            logger.info(f"🔄 音频转换成功：{mime_type} → WAV（16kHz 单声道）")
             return await self.transcribe(wav_bytes, "wav")
             
         except Exception as e:
-            logger.error(f"WebM 转换失败：{e}，尝试直接识别...")
+            logger.error(f"音频转换失败（{mime_type}）：{e}，尝试直接识别...")
             # 如果转换失败，直接尝试原始数据
-            return await self.transcribe(webm_bytes, "webm")
+            return await self.transcribe(audio_bytes, mime_type)
 
 
 # 创建全局单例（整个程序只用一个 ASR 实例，节省内存）

@@ -326,6 +326,154 @@ class CRMService:
         finally:
             db.close()
 
+    # ============================================================
+    # 新增：智能 CRM 查询功能
+    # ============================================================
+
+    def search_users(self, keyword: str) -> List[Dict]:
+        """
+        根据关键词搜索用户（支持姓名、电话、邮箱模糊匹配）
+        用于：当用户提到某个客户名字时，自动查找该客户的信息
+        
+        参数：
+            keyword：搜索关键词（如"张三"、"13812345678"）
+        
+        返回：匹配的用户列表
+        """
+        if not keyword or not keyword.strip():
+            return []
+        
+        keyword = keyword.strip()
+        db = self._get_db()
+        try:
+            # 在姓名、电话、邮箱、公司字段中模糊搜索
+            users = (
+                db.query(User)
+                .filter(
+                    (User.name.contains(keyword)) |
+                    (User.phone.contains(keyword)) |
+                    (User.email.contains(keyword)) |
+                    (User.company.contains(keyword))
+                )
+                .all()
+            )
+            results = [user.to_dict() for user in users]
+            if results:
+                logger.info(f"🔍 搜索用户 '{keyword}' 找到 {len(results)} 条结果")
+            return results
+        finally:
+            db.close()
+
+    def get_user_text(self, session_id: str) -> str:
+        """
+        获取当前用户的完整信息，格式化为文本
+        用于注入到 LLM 的 system prompt 中，让 AI 了解当前用户
+        
+        返回：格式化的用户信息文本，如果没有信息则返回空字符串
+        """
+        user = self.get_user(session_id)
+        if not user:
+            return ""
+        
+        # 过滤掉空值字段
+        info_parts = []
+        if user.get("name"):
+            info_parts.append(f"姓名：{user['name']}")
+        if user.get("phone"):
+            info_parts.append(f"电话：{user['phone']}")
+        if user.get("email"):
+            info_parts.append(f"邮箱：{user['email']}")
+        if user.get("address"):
+            info_parts.append(f"地址：{user['address']}")
+        if user.get("company"):
+            info_parts.append(f"公司：{user['company']}")
+        if user.get("needs"):
+            info_parts.append(f"需求：{user['needs']}")
+        if user.get("other"):
+            info_parts.append(f"其他：{user['other']}")
+        
+        if not info_parts:
+            return ""
+        
+        return "当前用户信息：\n" + "\n".join(info_parts)
+
+    def get_all_users_text(self) -> str:
+        """
+        获取所有用户的摘要信息，格式化为文本
+        用于：当用户问"有哪些客户"时，AI 可以回答
+        
+        返回：所有用户的摘要文本
+        """
+        users = self.get_all_users()
+        if not users:
+            return "目前 CRM 系统中还没有客户信息。"
+        
+        lines = [f"CRM 系统中共有 {len(users)} 位客户：\n"]
+        for i, user in enumerate(users, 1):
+            parts = []
+            if user.get("name"):
+                parts.append(user["name"])
+            if user.get("phone"):
+                parts.append(user["phone"])
+            if user.get("company"):
+                parts.append(f"({user['company']})")
+            if user.get("needs"):
+                parts.append(f"- 需求：{user['needs']}")
+            
+            line = f"{i}. {' '.join(parts)}" if parts else f"{i}. （未填写信息）"
+            lines.append(line)
+        
+        return "\n".join(lines)
+
+    def export_user_profiles(self, output_path: str) -> str:
+        """
+        导出所有用户的画像信息到可读文本文件（UTF-8 编码）
+        类似 chat_records_readable.txt，但专门展示用户画像
+        
+        参数：
+            output_path：输出文件路径
+            
+        返回：输出文件的路径
+        """
+        db = self._get_db()
+        try:
+            users = db.query(User).order_by(User.updated_at.desc()).all()
+            
+            out = Path(output_path)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            
+            chunks: List[str] = []
+            chunks.append("=" * 64)
+            chunks.append("           小智 CRM — 客户画像信息导出")
+            chunks.append("=" * 64)
+            chunks.append(f"导出时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            chunks.append(f"客户总数: {len(users)}")
+            chunks.append("")
+            
+            if not users:
+                chunks.append("（暂无客户信息）")
+            else:
+                for i, user in enumerate(users, 1):
+                    chunks.append("-" * 64)
+                    chunks.append(f"客户 #{i}")
+                    chunks.append(f"  会话ID：{user.session_id}")
+                    chunks.append(f"  姓  名：{user.name or '（未填写）'}")
+                    chunks.append(f"  电  话：{user.phone or '（未填写）'}")
+                    chunks.append(f"  邮  箱：{user.email or '（未填写）'}")
+                    chunks.append(f"  地  址：{user.address or '（未填写）'}")
+                    chunks.append(f"  公  司：{user.company or '（未填写）'}")
+                    chunks.append(f"  需  求：{user.needs or '（未填写）'}")
+                    chunks.append(f"  其  他：{user.other or '（未填写）'}")
+                    chunks.append(f"  创建时间：{user.created_at.strftime('%Y-%m-%d %H:%M:%S') if user.created_at else '-'}")
+                    chunks.append(f"  更新时间：{user.updated_at.strftime('%Y-%m-%d %H:%M:%S') if user.updated_at else '-'}")
+                    chunks.append("")
+            
+            out.write_text("\n".join(chunks), encoding="utf-8")
+            logger.info(f"✅ 已导出客户画像: {out}")
+            return str(out)
+        finally:
+            db.close()
+
 
 # 全局单例
 _crm_instance = None
