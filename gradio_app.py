@@ -40,28 +40,104 @@ BG_SRC   = load_b64("beijing.png", "image/jpeg")
 
 # ===================== 核心逻辑 =====================
 async def handle_text_chat(user_msg: str, history: list, session_id: str):
+    """
+    处理文本聊天（增强版）
+    
+    【改进流程】
+    原版：用户消息 → LLM（无上下文）→ 回复 → 提取用户信息
+    改进：用户消息 → 提取关键词 → 搜索CRM → 构建上下文 → LLM（有知识库+CRM数据）→ 回复 → 提取用户信息
+    """
     if not user_msg.strip():
         return history, None, ""
+    
+    # 1. 保存用户消息到 CRM
     crm_service.save_message(session_id, "user", user_msg)
+    
+    # 2. 构建对话历史
     llm_history = []
     for u, b in history:
         if u: llm_history.append({"role": "user",      "content": u})
         if b: llm_history.append({"role": "assistant", "content": b})
-    ai_reply = await llm_service.chat(user_msg, llm_history)
+    
+    # 3. 【新增】构建 CRM 上下文
+    crm_context = {}
+    
+    # 3a. 获取当前用户的 CRM 信息（让 AI 知道在和谁对话）
+    user_info_text = crm_service.get_user_text(session_id)
+    if user_info_text:
+        crm_context["user_info_text"] = user_info_text
+        logger.info(f"👤 已加载当前用户信息: {user_info_text[:50]}...")
+    
+    # 3b. 从用户消息中提取关键词，搜索 CRM 中的客户
+    keywords = llm_service._extract_search_keywords(user_msg)
+    crm_search_results = []
+    for kw in keywords:
+        results = crm_service.search_users(kw)
+        crm_search_results.extend(results)
+    
+    if crm_search_results:
+        # 去重
+        seen = set()
+        unique_results = []
+        for r in crm_search_results:
+            key = r.get("session_id", "")
+            if key and key not in seen:
+                seen.add(key)
+                unique_results.append(r)
+        
+        # 格式化搜索结果
+        search_lines = []
+        for r in unique_results:
+            parts = []
+            if r.get("name"): parts.append(f"姓名：{r['name']}")
+            if r.get("phone"): parts.append(f"电话：{r['phone']}")
+            if r.get("email"): parts.append(f"邮箱：{r['email']}")
+            if r.get("company"): parts.append(f"公司：{r['company']}")
+            if r.get("needs"): parts.append(f"需求：{r['needs']}")
+            if r.get("other"): parts.append(f"其他：{r['other']}")
+            search_lines.append("  - " + "，".join(parts))
+        
+        crm_context["crm_search_result"] = "找到以下客户信息：\n" + "\n".join(search_lines)
+        logger.info(f"🔍 CRM 搜索到 {len(unique_results)} 条客户信息")
+    
+    # 3c. 如果用户问的是"有哪些客户"、"所有客户"等，加载全部客户列表
+    all_customer_keywords = ["所有客户", "有哪些客户", "客户列表", "全部客户", "查看客户", "客户信息", "有哪些用户"]
+    if any(kw in user_msg for kw in all_customer_keywords):
+        all_users = crm_service.get_all_users_text()
+        crm_context["all_users_text"] = all_users
+        logger.info("📋 已加载全部客户列表")
+    
+    # 4. 调用 LLM（传入 CRM 上下文 + 知识库）
+    ai_reply = await llm_service.chat(user_msg, llm_history, crm_context=crm_context)
+    
+    # 4b. 清洗 Markdown 格式（Gradio 不渲染 Markdown，** 和 ## 会原样显示）
+    ai_reply = re.sub(r'\*\*(.+?)\*\*', r'\1', ai_reply)       # **加粗** → 加粗
+    ai_reply = re.sub(r'(?m)^#{1,6}\s+', '', ai_reply)          # ## 标题 → 去掉
+    #ai_reply = re.sub(r'(?m)^[-*]\s+', '', ai_reply)             # - 列表 → 去掉符号
+    #ai_reply = re.sub(r'`{1,3}[^`]*`{1,3}', '', ai_reply)       # `代码` → 去掉
+    ai_reply = re.sub(r'\n{3,}', '\n\n', ai_reply)               # 多个空行 → 最多两个
+    # 5. 保存 AI 回复到 CRM
     crm_service.save_message(session_id, "assistant", ai_reply)
+    
+    # 6. 从对话中提取用户信息并更新 CRM
     try:
         conv = crm_service.get_session_text(session_id)
         info = await llm_service.extract_user_info(conv)
         if info:
             crm_service.update_user_info(session_id, info)
-            logger.info(f"📝 用户信息: {info}")
+            logger.info(f"📝 用户信息更新: {info}")
     except Exception as e:
         logger.warning(f"⚠️ 提取失败: {e}")
-    # 语音播报前清洗文本：去掉颜文字/符号，只保留核心可读内容
+    
+    # 7. 语音播报
     tts_text = re.sub(r"\([^)]*\)", " ", ai_reply)
     tts_text = re.sub(r"[\u2600-\u27BF\U0001F300-\U0001FAFF]", " ", tts_text)
     tts_text = re.sub(r"[^\u4e00-\u9fffA-Za-z0-9\s]", " ", tts_text)
     tts_text = re.sub(r"\s+", " ", tts_text).strip()
+    # 截断保护：超过 250字只取前 250字，语音合成太长会卡很久
+    if len(tts_text) > 250:
+        tts_text = tts_text[:250].rsplit(" ", 1)[0]  # 在最后一个空格处截断，避免断词
+        logger.info(f"✂️ TTS 文本过长，已截断至 {len(tts_text)} 字")
     if not tts_text:
         tts_text = ai_reply
     tts_audio = await tts_service.synthesize(tts_text)
@@ -70,6 +146,7 @@ async def handle_text_chat(user_msg: str, history: list, session_id: str):
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
             f.write(tts_audio)
             audio_path = f.name
+    
     return history + [(user_msg, ai_reply)], audio_path, ""
 
 async def handle_voice_input(audio_path: str, history: list, session_id: str):
@@ -79,7 +156,15 @@ async def handle_voice_input(audio_path: str, history: list, session_id: str):
     
     try:
         audio_bytes = open(audio_path, "rb").read()
-        user_text = await asr_service.transcribe_from_webm(audio_bytes)
+        
+        # 根据文件后缀判断格式，传给正确的转换方法
+        if audio_path.endswith(".mp4"):
+            user_text = await asr_service.transcribe_from_browser(audio_bytes, mime_type="mp4")
+        elif audio_path.endswith(".webm"):
+            user_text = await asr_service.transcribe_from_browser(audio_bytes, mime_type="webm")
+        else:
+            user_text = await asr_service.transcribe_from_browser(audio_bytes, mime_type="webm")
+        
         if not user_text:
             return history, None, tip("⚠️ 未识别到语音，请重试")
         
@@ -175,7 +260,7 @@ footer, .built-with { display:none !important; }
 
 /* ── 左侧角色区 ── */
 .char-col {
-    flex:0 0 56% !important; max-width:56% !important;
+    flex:0 0 50% !important; max-width:50% !important;
     position:relative; z-index:1;
     display:flex !important; flex-direction:column !important;
     align-items:center !important; justify-content:center !important;
@@ -218,7 +303,7 @@ footer, .built-with { display:none !important; }
     display:flex !important; flex-direction:row !important;
     gap:14px !important; justify-content:flex-start !important;
     padding:12px 16px 13px !important;
-    margin:-10px 0 24px -346px !important;
+    margin:-10px 0 24px -270px !important;
     background:linear-gradient(135deg, rgba(26,26,38,0.80), rgba(34,28,48,0.72)) !important;
     border:1px solid rgba(255,255,255,0.14) !important;
     border-radius:26px !important;
@@ -269,7 +354,7 @@ footer, .built-with { display:none !important; }
 }
 /* ── 右侧聊天列整体左移 ── */
 .chat-col {
-        transform: translateX(-180px) !important;
+        transform: translateX(-80px) !important;
         display: flex !important;
         flex-direction: column !important;
         height: 100vh !important;
@@ -387,7 +472,7 @@ footer, .built-with { display:none !important; }
     min-height:var(--chat-input-h) !important;
     max-height:var(--chat-input-h) !important;
     position:relative !important;
-    z-index:6 !important;
+    z-index:80 !important;
     backdrop-filter:none;
     background:transparent !important; border-left:none !important;
     border-right:none !important; border-bottom:none !important; box-shadow:none !important;
@@ -742,17 +827,26 @@ def build_app():
         def open_data_folder():
             db_list = [n for n in ["crm_database.db", "crm_customers.db"] if (BASE_DIR / n).exists()]
             try:
+                # 导出对话记录
                 export_path = BASE_DIR / "chat_records_readable.txt"
                 crm_service.export_readable_records(str(export_path))
+                
+                # 【新增】导出客户画像信息（类似 chat_records_readable.txt，但展示用户画像）
+                from config import USER_PROFILES_PATH
+                profiles_path = Path(USER_PROFILES_PATH)
+                crm_service.export_user_profiles(str(profiles_path))
+                
                 if os.name == "nt":
                     os.startfile(str(BASE_DIR))
                 elif sys.platform == "darwin":
                     subprocess.Popen(["open", str(BASE_DIR)])
                 else:
                     subprocess.Popen(["xdg-open", str(BASE_DIR)])
+                
+                files_generated = ["chat_records_readable.txt", "user_profiles.txt"]
                 if db_list:
-                    return tip(f"📂 已打开数据文件夹，已生成 chat_records_readable.txt（含 {', '.join(db_list)}）")
-                return tip("📂 已打开数据文件夹，已生成 chat_records_readable.txt")
+                    return tip(f"📂 已打开数据文件夹，已生成 {', '.join(files_generated)}（含 {', '.join(db_list)}）")
+                return tip(f"📂 已打开数据文件夹，已生成 {', '.join(files_generated)}")
             except Exception as e:
                 logger.error(f"打开数据文件夹失败: {e}")
                 return tip("❌ 打开数据文件夹失败")
